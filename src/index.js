@@ -1,5 +1,5 @@
 const API = "https://api.sleeper.app/v1";
-const SERVER = { name: "sleeper-fantasy", version: "1.1.0" };
+const SERVER = { name: "sleeper-fantasy", version: "1.2.0" };
 let playerCache = { fetchedAt: 0, data: null };
 
 export const toolDefinitions = [
@@ -29,12 +29,47 @@ export const toolDefinitions = [
     annotations: readOnlyAnnotations()
   },
   {
+    name: "get_trending_players",
+    description: "Get Sleeper's most-added and/or most-dropped NFL players, enrich them with player metadata, and optionally show whether each player is available or rostered in a specific league.",
+    inputSchema: objectSchema({
+      league_id: idSchema("Optional Sleeper league ID used to add league ownership and availability"),
+      type: { type: "string", enum: ["add", "drop", "both"], default: "both" },
+      lookback_hours: { type: "integer", minimum: 1, maximum: 720, default: 24 },
+      limit: { type: "integer", minimum: 1, maximum: 100, default: 25 }
+    }, []),
+    annotations: readOnlyAnnotations()
+  },
+  {
+    name: "get_league_history",
+    description: "Walk backward through a Sleeper league's previous_league_id chain and return season metadata plus optional final standings for each linked season.",
+    inputSchema: objectSchema({
+      league_id: idSchema("Current or newest Sleeper league ID"),
+      max_seasons: { type: "integer", minimum: 1, maximum: 20, default: 10 },
+      include_standings: { type: "boolean", default: true }
+    }, ["league_id"]),
+    annotations: readOnlyAnnotations()
+  },
+  {
+    name: "get_playoff_picture",
+    description: "Get current standings plus Sleeper winners and losers playoff brackets, enriched with fantasy team and owner names.",
+    inputSchema: objectSchema({ league_id: idSchema("Sleeper league ID") }, ["league_id"]),
+    annotations: readOnlyAnnotations()
+  },
+  {
+    name: "get_traded_picks",
+    description: "Get all traded draft picks in a Sleeper league, including future picks, enriched with original, previous, and current fantasy-team ownership.",
+    inputSchema: objectSchema({ league_id: idSchema("Sleeper league ID") }, ["league_id"]),
+    annotations: readOnlyAnnotations()
+  },
+  {
     name: "get_rivalry_history",
     description: "Calculate head-to-head history between stable Sleeper user IDs across league seasons for rivalry recaps and all-time records.",
     inputSchema: objectSchema({
-      league_ids: { type: "array", minItems: 1, maxItems: 10, items: { type: "string" }, description: "League IDs, usually newest to oldest" },
+      league_id: idSchema("Current/newest league ID; when provided, prior seasons are discovered automatically"),
+      league_ids: { type: "array", minItems: 1, maxItems: 20, items: { type: "string" }, description: "Optional explicit league IDs, usually newest to oldest" },
+      max_seasons: { type: "integer", minimum: 1, maximum: 20, default: 10, description: "Maximum seasons to traverse when league_id is used" },
       regular_season_weeks: { type: "integer", minimum: 1, maximum: 18, description: "Optional weeks per league; otherwise inferred from playoff settings" }
-    }, ["league_ids"]),
+    }, []),
     annotations: readOnlyAnnotations()
   },
   {
@@ -74,7 +109,7 @@ function cleanId(value, label = "ID") {
 
 async function sleeper(path) {
   const response = await fetch(`${API}${path}`, {
-    headers: { "User-Agent": "sleeper-fantasy-mcp/1.1" },
+    headers: { "User-Agent": "sleeper-fantasy-mcp/1.2" },
     signal: AbortSignal.timeout(20_000)
   });
   if (!response.ok) throw new Error(`Sleeper API returned ${response.status} for ${path}`);
@@ -123,8 +158,15 @@ function playerMetadata(player) {
   return {
     full_name: player.full_name || `${player.first_name || ""} ${player.last_name || ""}`.trim(),
     position: player.position || null,
+    fantasy_positions: player.fantasy_positions || [],
     team: player.team || null,
+    active: player.active ?? null,
     status: player.status || null,
+    depth_chart_position: player.depth_chart_position ?? null,
+    depth_chart_order: player.depth_chart_order ?? null,
+    years_exp: player.years_exp ?? null,
+    age: player.age ?? null,
+    news_updated: player.news_updated ?? null,
     injury_status: player.injury_status || null,
     injury_body_part: player.injury_body_part || null,
     injury_start_date: player.injury_start_date || null,
@@ -229,6 +271,201 @@ async function leagueInjuries({ league_id, include_healthy = false }) {
   };
 }
 
+async function getLeagueChain(leagueId, maxSeasons = 10) {
+  const seasons = [];
+  const seen = new Set();
+  let currentId = cleanId(leagueId, "league_id");
+  const limit = Math.max(1, Math.min(20, Number(maxSeasons || 10)));
+
+  while (currentId && seasons.length < limit && !seen.has(currentId)) {
+    seen.add(currentId);
+    const league = await sleeper(`/league/${currentId}`);
+    seasons.push(league);
+    const previous = league.previous_league_id;
+    if (!previous || previous === "0") break;
+    currentId = cleanId(previous, "previous_league_id");
+  }
+  return seasons;
+}
+
+async function leagueHistory({ league_id, max_seasons = 10, include_standings = true }) {
+  const chain = await getLeagueChain(league_id, max_seasons);
+  const seasons = await Promise.all(chain.map(async (league) => {
+    let standings;
+    if (include_standings) {
+      const [users, rosters] = await Promise.all([
+        sleeper(`/league/${league.league_id}/users`),
+        sleeper(`/league/${league.league_id}/rosters`)
+      ]);
+      const owners = ownersFor(users, rosters);
+      standings = buildStandings(rosters, owners);
+    }
+    return {
+      league_id: league.league_id,
+      name: league.name,
+      season: league.season,
+      status: league.status,
+      previous_league_id: league.previous_league_id || null,
+      total_rosters: league.total_rosters,
+      playoff_week_start: league.settings?.playoff_week_start ?? null,
+      playoff_teams: league.settings?.playoff_teams ?? null,
+      standings
+    };
+  }));
+  return {
+    start_league_id: cleanId(league_id, "league_id"),
+    seasons_found: seasons.length,
+    truncated: chain.length >= Math.max(1, Math.min(20, Number(max_seasons || 10))) && Boolean(chain.at(-1)?.previous_league_id),
+    seasons
+  };
+}
+
+async function trendingPlayers({ league_id, type = "both", lookback_hours = 24, limit = 25 }) {
+  const normalizedType = String(type || "both").toLowerCase();
+  if (!["add", "drop", "both"].includes(normalizedType)) throw new Error("type must be add, drop, or both");
+  const hours = Math.max(1, Math.min(720, Number(lookback_hours || 24)));
+  const maxResults = Math.max(1, Math.min(100, Number(limit || 25)));
+  const types = normalizedType === "both" ? ["add", "drop"] : [normalizedType];
+
+  const catalogPromise = getPlayerCatalog();
+  const trendPromise = Promise.all(types.map(async (trendType) => [
+    trendType,
+    await sleeper(`/players/nfl/trending/${trendType}?lookback_hours=${hours}&limit=${maxResults}`)
+  ]));
+  const leaguePromise = league_id
+    ? Promise.all([
+        sleeper(`/league/${cleanId(league_id, "league_id")}`),
+        sleeper(`/league/${cleanId(league_id, "league_id")}/users`),
+        sleeper(`/league/${cleanId(league_id, "league_id")}/rosters`)
+      ])
+    : Promise.resolve(null);
+
+  const [catalog, trendEntries, leagueData] = await Promise.all([catalogPromise, trendPromise, leaguePromise]);
+
+  let league = null;
+  const ownership = new Map();
+  if (leagueData) {
+    const [leagueObject, users, rosters] = leagueData;
+    league = { league_id: leagueObject.league_id, name: leagueObject.name, season: leagueObject.season };
+    const owners = ownersFor(users, rosters);
+    for (const roster of rosters) {
+      const starters = new Set(roster.starters || []);
+      const reserves = new Set(roster.reserve || []);
+      for (const playerId of roster.players || []) {
+        ownership.set(playerId, {
+          roster_id: roster.roster_id,
+          owner: owners[roster.roster_id]?.display_name || null,
+          fantasy_team: owners[roster.roster_id]?.team_name || null,
+          is_starter: starters.has(playerId),
+          is_reserve: reserves.has(playerId)
+        });
+      }
+    }
+  }
+
+  const trends = {};
+  for (const [trendType, list] of trendEntries) {
+    trends[trendType] = (list || []).map((item) => {
+      const playerId = String(item.player_id);
+      const player = catalog.data[playerId] || {};
+      const owned = ownership.get(playerId) || null;
+      return {
+        rank: 0,
+        trend_type: trendType,
+        player_id: playerId,
+        count: item.count,
+        ...playerMetadata(player),
+        rostered_in_league: Boolean(owned),
+        available_in_league: league ? !owned : null,
+        ...(owned || {})
+      };
+    }).map((item, index) => ({ ...item, rank: index + 1 }));
+  }
+
+  return {
+    league,
+    lookback_hours: hours,
+    limit: maxResults,
+    player_data_fetched_at: new Date(catalog.fetchedAt).toISOString(),
+    trends
+  };
+}
+
+function bracketTeam(rosterId, owners) {
+  if (typeof rosterId !== "number") return null;
+  const owner = owners[rosterId];
+  return owner ? {
+    roster_id: rosterId,
+    user_id: owner.user_id,
+    owner: owner.display_name,
+    fantasy_team: owner.team_name
+  } : { roster_id: rosterId };
+}
+
+function enrichBracket(bracket, owners) {
+  return (bracket || []).map((match) => ({
+    ...match,
+    t1_team: bracketTeam(match.t1, owners),
+    t2_team: bracketTeam(match.t2, owners),
+    winner_team: bracketTeam(match.w, owners),
+    loser_team: bracketTeam(match.l, owners)
+  }));
+}
+
+async function playoffPicture({ league_id }) {
+  const id = cleanId(league_id, "league_id");
+  const [league, users, rosters, winnersBracket, losersBracket] = await Promise.all([
+    sleeper(`/league/${id}`),
+    sleeper(`/league/${id}/users`),
+    sleeper(`/league/${id}/rosters`),
+    sleeper(`/league/${id}/winners_bracket`),
+    sleeper(`/league/${id}/losers_bracket`)
+  ]);
+  const owners = ownersFor(users, rosters);
+  return {
+    league: {
+      league_id: league.league_id,
+      name: league.name,
+      season: league.season,
+      status: league.status,
+      playoff_week_start: league.settings?.playoff_week_start ?? null,
+      playoff_teams: league.settings?.playoff_teams ?? null
+    },
+    standings: buildStandings(rosters, owners),
+    winners_bracket: enrichBracket(winnersBracket, owners),
+    losers_bracket: enrichBracket(losersBracket, owners)
+  };
+}
+
+async function tradedPicks({ league_id }) {
+  const id = cleanId(league_id, "league_id");
+  const [league, users, rosters, picks] = await Promise.all([
+    sleeper(`/league/${id}`),
+    sleeper(`/league/${id}/users`),
+    sleeper(`/league/${id}/rosters`),
+    sleeper(`/league/${id}/traded_picks`)
+  ]);
+  const owners = ownersFor(users, rosters);
+  const ownerSummary = (rosterId) => {
+    const owner = owners[rosterId];
+    return owner ? {
+      roster_id: rosterId,
+      user_id: owner.user_id,
+      owner: owner.display_name,
+      fantasy_team: owner.team_name
+    } : { roster_id: rosterId };
+  };
+  return {
+    league: { league_id: league.league_id, name: league.name, season: league.season },
+    picks: (picks || []).map((pick) => ({
+      ...pick,
+      original_owner: ownerSummary(pick.roster_id),
+      previous_owner: ownerSummary(pick.previous_owner_id),
+      current_owner: ownerSummary(pick.owner_id)
+    }))
+  };
+}
+
 async function weeklyDebrief({ league_id, week, include_players = true }) {
   const id = cleanId(league_id, "league_id");
   const [league, users, rosters, rawMatchups, transactions] = await Promise.all([
@@ -266,13 +503,22 @@ async function weeklyDebrief({ league_id, week, include_players = true }) {
   };
 }
 
-async function rivalryHistory({ league_ids, regular_season_weeks }) {
+async function rivalryHistory({ league_id, league_ids, max_seasons = 10, regular_season_weeks }) {
   const records = {};
   const seasons = [];
-  for (const rawLeagueId of league_ids) {
+  let ids = Array.isArray(league_ids) && league_ids.length ? league_ids : null;
+  let prefetched = null;
+  if (!ids && league_id) {
+    prefetched = await getLeagueChain(league_id, max_seasons);
+    ids = prefetched.map((league) => league.league_id);
+  }
+  if (!ids?.length) throw new Error("Provide league_id for automatic history traversal or league_ids explicitly");
+
+  for (const rawLeagueId of ids) {
     const leagueId = cleanId(rawLeagueId, "league_id");
-    const [league, users, rosters] = await Promise.all([
-      sleeper(`/league/${leagueId}`), sleeper(`/league/${leagueId}/users`), sleeper(`/league/${leagueId}/rosters`)
+    const league = prefetched?.find((item) => item.league_id === leagueId) || await sleeper(`/league/${leagueId}`);
+    const [users, rosters] = await Promise.all([
+      sleeper(`/league/${leagueId}/users`), sleeper(`/league/${leagueId}/rosters`)
     ]);
     const owners = ownersFor(users, rosters);
     const lastWeek = regular_season_weeks || Math.max(1, Math.min(18, Number(league.settings?.playoff_week_start || 15) - 1));
@@ -322,6 +568,10 @@ export async function callTool(name, args = {}) {
   if (name === "get_league_overview") return leagueOverview(args.league_id);
   if (name === "get_weekly_debrief") return weeklyDebrief(args);
   if (name === "get_league_injuries") return leagueInjuries(args);
+  if (name === "get_trending_players") return trendingPlayers(args);
+  if (name === "get_league_history") return leagueHistory(args);
+  if (name === "get_playoff_picture") return playoffPicture(args);
+  if (name === "get_traded_picks") return tradedPicks(args);
   if (name === "get_rivalry_history") return rivalryHistory(args);
   if (name === "get_league_drafts") {
     const leagueId = cleanId(args.league_id, "league_id");

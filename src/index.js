@@ -1,5 +1,5 @@
 const API = "https://api.sleeper.app/v1";
-const SERVER = { name: "sleeper-fantasy", version: "1.2.1" };
+const SERVER = { name: "sleeper-fantasy", version: "1.3.0" };
 let playerCache = { fetchedAt: 0, data: null };
 
 export const toolDefinitions = [
@@ -11,7 +11,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_weekly_debrief",
-    description: "Get analysis-ready weekly data: paired matchups, team names, scores, starters, bench, player points, transactions, standings, and player metadata.",
+    description: "Get analysis-ready weekly data: paired matchups, team names, scores, starters, bench, player points, transactions, standings, player metadata, and explicit completed/current/future matchup status.",
     inputSchema: objectSchema({
       league_id: idSchema("Sleeper league ID"),
       week: { type: "integer", minimum: 1, maximum: 25 },
@@ -51,7 +51,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_playoff_picture",
-    description: "Get current standings plus Sleeper winners and losers playoff brackets, enriched with fantasy team and owner names.",
+    description: "Get current standings plus Sleeper winners and losers playoff brackets, enriched with team names and explicit playoff/bracket status so pre-playoff bracket data is not mistaken for completed results.",
     inputSchema: objectSchema({ league_id: idSchema("Sleeper league ID") }, ["league_id"]),
     annotations: readOnlyAnnotations()
   },
@@ -109,7 +109,7 @@ function cleanId(value, label = "ID") {
 
 async function sleeper(path) {
   const response = await fetch(`${API}${path}`, {
-    headers: { "User-Agent": "sleeper-fantasy-mcp/1.2.1" },
+    headers: { "User-Agent": "sleeper-fantasy-mcp/1.3.0" },
     signal: AbortSignal.timeout(20_000)
   });
   if (!response.ok) throw new Error(`Sleeper API returned ${response.status} for ${path}`);
@@ -412,25 +412,51 @@ function enrichBracket(bracket, owners) {
   }));
 }
 
+export function classifyPlayoffState(league, nflState, winnersBracket = [], losersBracket = []) {
+  const currentWeek = Number(nflState?.week ?? 0);
+  const playoffWeekStart = Number(league.settings?.playoff_week_start ?? 0);
+  const bracketDataAvailable = Boolean((winnersBracket?.length || 0) + (losersBracket?.length || 0));
+  const playoffsStarted = league.status === "complete" ||
+    (playoffWeekStart > 0 && currentWeek >= playoffWeekStart);
+
+  let bracketStatus;
+  if (league.status === "complete") bracketStatus = "complete";
+  else if (playoffsStarted) bracketStatus = "active";
+  else if (bracketDataAvailable) bracketStatus = "scheduled";
+  else bracketStatus = "not_available";
+
+  return {
+    current_week: currentWeek || null,
+    playoff_week_start: playoffWeekStart || null,
+    playoffs_started: playoffsStarted,
+    bracket_data_available: bracketDataAvailable,
+    bracket_status: bracketStatus
+  };
+}
+
 async function playoffPicture({ league_id }) {
   const id = cleanId(league_id, "league_id");
-  const [league, users, rosters, winnersBracket, losersBracket] = await Promise.all([
+  const [league, users, rosters, winnersBracket, losersBracket, nflState] = await Promise.all([
     sleeper(`/league/${id}`),
     sleeper(`/league/${id}/users`),
     sleeper(`/league/${id}/rosters`),
     sleeper(`/league/${id}/winners_bracket`),
-    sleeper(`/league/${id}/losers_bracket`)
+    sleeper(`/league/${id}/losers_bracket`),
+    sleeper("/state/nfl")
   ]);
   const owners = ownersFor(users, rosters);
+  const playoffState = classifyPlayoffState(league, nflState, winnersBracket, losersBracket);
   return {
     league: {
       league_id: league.league_id,
       name: league.name,
       season: league.season,
       status: league.status,
+      current_week: playoffState.current_week,
       playoff_week_start: league.settings?.playoff_week_start ?? null,
       playoff_teams: league.settings?.playoff_teams ?? null
     },
+    playoff_state: playoffState,
     standings: buildStandings(rosters, owners),
     winners_bracket: enrichBracket(winnersBracket, owners),
     losers_bracket: enrichBracket(losersBracket, owners)
@@ -466,12 +492,33 @@ async function tradedPicks({ league_id }) {
   };
 }
 
+export function classifyWeekState(league, nflState, week, teams = []) {
+  const requestedWeek = Number(week);
+  const currentWeek = Number(nflState?.week ?? 0);
+  const lastScoredWeek = Number(league.settings?.last_scored_leg ?? 0);
+  const hasScoring = teams.some((team) => Number(team.points || 0) !== 0);
+
+  let status;
+  if (requestedWeek <= lastScoredWeek) status = "completed";
+  else if (currentWeek > 0 && requestedWeek > currentWeek) status = "future";
+  else if (currentWeek > 0 && requestedWeek === currentWeek) status = hasScoring ? "in_progress" : "upcoming";
+  else status = hasScoring ? "in_progress" : "pending";
+
+  return {
+    status,
+    is_completed: status === "completed",
+    is_current: currentWeek > 0 && requestedWeek === currentWeek,
+    is_future: status === "future",
+    is_in_progress: status === "in_progress"
+  };
+}
+
 async function weeklyDebrief({ league_id, week, include_players = true }) {
   const id = cleanId(league_id, "league_id");
-  const [league, users, rosters, rawMatchups, transactions] = await Promise.all([
+  const [league, users, rosters, rawMatchups, transactions, nflState] = await Promise.all([
     sleeper(`/league/${id}`), sleeper(`/league/${id}/users`),
     sleeper(`/league/${id}/rosters`), sleeper(`/league/${id}/matchups/${week}`),
-    sleeper(`/league/${id}/transactions/${week}`)
+    sleeper(`/league/${id}/transactions/${week}`), sleeper("/state/nfl")
   ]);
   const owners = ownersFor(users, rosters);
   const groups = new Map();
@@ -483,11 +530,26 @@ async function weeklyDebrief({ league_id, week, include_players = true }) {
       starters: team.starters || [], players: team.players || [], players_points: team.players_points || {}
     });
   }
-  const matchups = [...groups.entries()].map(([matchup_id, teams]) => ({
-    matchup_id,
-    teams: teams.sort((a, b) => b.points - a.points),
-    margin: teams.length === 2 ? Math.abs(Number(teams[0].points) - Number(teams[1].points)) : null
-  }));
+
+  const requestedWeekState = classifyWeekState(league, nflState, week, rawMatchups);
+  const matchups = [...groups.entries()].map(([matchup_id, teams]) => {
+    const matchupState = classifyWeekState(league, nflState, week, teams);
+    const sortedTeams = teams.sort((a, b) => b.points - a.points);
+    const margin = teams.length === 2 && (matchupState.is_completed || matchupState.is_in_progress)
+      ? Math.abs(Number(teams[0].points) - Number(teams[1].points))
+      : null;
+    return {
+      matchup_id,
+      matchup_status: matchupState.status,
+      is_completed: matchupState.is_completed,
+      is_current: matchupState.is_current,
+      is_future: matchupState.is_future,
+      is_in_progress: matchupState.is_in_progress,
+      teams: sortedTeams,
+      margin
+    };
+  });
+
   const playerIds = new Set();
   for (const matchup of rawMatchups) {
     for (const id of matchup.players || []) playerIds.add(id);
@@ -498,7 +560,15 @@ async function weeklyDebrief({ league_id, week, include_players = true }) {
     for (const id of Object.keys(transaction.drops || {})) playerIds.add(id);
   }
   return {
-    league, week, owners, standings: buildStandings(rosters, owners), matchups, transactions,
+    league,
+    week,
+    league_current_week: Number(nflState?.week ?? 0) || null,
+    last_scored_week: Number(league.settings?.last_scored_leg ?? 0) || 0,
+    week_status: requestedWeekState.status,
+    owners,
+    standings: buildStandings(rosters, owners),
+    matchups,
+    transactions,
     players: include_players ? await resolvePlayers(playerIds) : undefined
   };
 }

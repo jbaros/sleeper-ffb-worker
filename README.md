@@ -21,12 +21,12 @@ Use it to build weekly league recaps, inspect injuries, analyze waiver trends, e
 | Tool | Purpose |
 | --- | --- |
 | `get_league_overview` | League settings, owners, rosters, standings, and current NFL state |
-| `get_weekly_debrief` | Matchups, scores, starters, bench players, player points, transactions, standings, and player metadata |
+| `get_weekly_debrief` | Matchups, scores, starters, bench players, transactions, standings, player metadata, and explicit completed/current/future status |
 | `get_league_injuries` | Roster-aware injury and availability data with starter, reserve, practice, and depth-chart context |
 | `get_trending_players` | Sleeper-wide adds/drops with optional league ownership and free-agent availability |
 | `get_league_history` | Traverse linked prior seasons using `previous_league_id` |
 | `get_rivalry_history` | Historical head-to-head records across one or more league seasons |
-| `get_playoff_picture` | Current standings plus winners and losers playoff brackets |
+| `get_playoff_picture` | Current standings plus winners/losers brackets with explicit scheduled/active/complete playoff status |
 | `get_traded_picks` | Current and future traded draft picks with ownership mapping |
 | `get_league_drafts` | League drafts and completed draft picks |
 | `get_user_leagues` | NFL leagues for a Sleeper user and season |
@@ -84,13 +84,13 @@ The health endpoint is:
 https://sleeper-fantasy-mcp.<your-subdomain>.workers.dev/health
 ```
 
-For v1.2.1, the health response should include:
+For v1.3.0, the health response should include:
 
 ```json
 {
   "ok": true,
   "service": "sleeper-fantasy",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "mcp_endpoint": "/mcp"
 }
 ```
@@ -143,6 +143,26 @@ previous seasons. Include head-to-head records and total points scored.
 Give me the current playoff picture for league <LEAGUE_ID> and explain the
 current seeds and bracket matchups.
 ```
+
+## Matchup status
+
+`get_weekly_debrief` includes explicit timing/state fields so an MCP client does not have to infer whether a 0-0 matchup is finished, in progress, upcoming, or in a future week.
+
+Top-level fields include:
+
+- `league_current_week`
+- `last_scored_week`
+- `week_status`
+
+Each matchup includes:
+
+- `matchup_status` — `completed`, `in_progress`, `upcoming`, `future`, or `pending`
+- `is_completed`
+- `is_current`
+- `is_future`
+- `is_in_progress`
+
+Margins are left `null` for upcoming and future matchups instead of reporting a misleading 0-point margin.
 
 ## Player and injury data
 
@@ -219,7 +239,15 @@ You can also pass explicit league IDs to `get_rivalry_history` when you want com
 - Sleeper losers bracket
 - roster IDs resolved to owner/team names
 
-Bracket data may be empty or incomplete before Sleeper generates the playoff bracket for the season.
+The response also includes `playoff_state` with:
+
+- `current_week`
+- `playoff_week_start`
+- `playoffs_started`
+- `bracket_data_available`
+- `bracket_status` — `scheduled`, `active`, `complete`, or `not_available`
+
+Sleeper can expose bracket structures before the playoffs begin. When that happens, this project labels the bracket `scheduled` so clients do not mistake those entries for completed playoff results.
 
 ## Traded draft picks
 
@@ -303,6 +331,15 @@ npm run deploy
 ```
 
 ## Release notes
+
+### v1.3.0
+
+- Added explicit weekly matchup state to `get_weekly_debrief`.
+- Current-week 0-0 matchups are labeled `upcoming` instead of looking like ties.
+- Future weeks are labeled `future`, and their matchup margins are `null`.
+- Added `playoff_state` to distinguish scheduled, active, complete, and unavailable brackets.
+- Added regression tests for matchup and playoff state classification.
+
 
 ### v1.2.1
 

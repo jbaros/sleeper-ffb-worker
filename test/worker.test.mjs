@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker, { completedRegularSeasonWeeks, toolDefinitions } from "../src/index.js";
+import worker, { classifyPlayoffState, classifyWeekState, completedRegularSeasonWeeks, toolDefinitions } from "../src/index.js";
 
 test("health endpoint responds", async () => {
   const response = await worker.fetch(new Request("https://example.test/health"), {});
   assert.equal(response.status, 200);
   const health = await response.json();
   assert.equal(health.mcp_endpoint, "/mcp");
-  assert.equal(health.version, "1.2.1");
+  assert.equal(health.version, "1.3.0");
 });
 
 test("MCP initialize succeeds", async () => {
@@ -71,4 +71,40 @@ test("preseason leagues do not invent completed rivalry games", () => {
     settings: { playoff_week_start: 15 }
   };
   assert.equal(completedRegularSeasonWeeks(preseasonLeague), 0);
+});
+
+
+test("weekly status distinguishes completed, current, and future weeks", () => {
+  const league = { settings: { last_scored_leg: 3 } };
+  const nflState = { week: 4 };
+
+  assert.deepEqual(classifyWeekState(league, nflState, 3, [{ points: 100 }]), {
+    status: "completed",
+    is_completed: true,
+    is_current: false,
+    is_future: false,
+    is_in_progress: false
+  });
+
+  assert.equal(classifyWeekState(league, nflState, 4, [{ points: 0 }, { points: 0 }]).status, "upcoming");
+  assert.equal(classifyWeekState(league, nflState, 4, [{ points: 7 }, { points: 0 }]).status, "in_progress");
+  assert.equal(classifyWeekState(league, nflState, 5, [{ points: 0 }, { points: 0 }]).status, "future");
+});
+
+test("playoff status labels pre-playoff bracket data as scheduled", () => {
+  const league = { status: "in_season", settings: { playoff_week_start: 15 } };
+  const nflState = { week: 4 };
+  const state = classifyPlayoffState(league, nflState, [{ m: 1 }], [{ m: 1 }]);
+
+  assert.equal(state.playoffs_started, false);
+  assert.equal(state.bracket_data_available, true);
+  assert.equal(state.bracket_status, "scheduled");
+});
+
+test("playoff status becomes active or complete at the right time", () => {
+  const activeLeague = { status: "in_season", settings: { playoff_week_start: 15 } };
+  assert.equal(classifyPlayoffState(activeLeague, { week: 15 }, [], []).bracket_status, "active");
+
+  const completeLeague = { status: "complete", settings: { playoff_week_start: 15 } };
+  assert.equal(classifyPlayoffState(completeLeague, { week: 18 }, [], []).bracket_status, "complete");
 });

@@ -1,5 +1,5 @@
 const API = "https://api.sleeper.app/v1";
-const SERVER = { name: "sleeper-fantasy", version: "1.2.0" };
+const SERVER = { name: "sleeper-fantasy", version: "1.2.1" };
 let playerCache = { fetchedAt: 0, data: null };
 
 export const toolDefinitions = [
@@ -63,7 +63,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_rivalry_history",
-    description: "Calculate head-to-head history between stable Sleeper user IDs across league seasons for rivalry recaps and all-time records.",
+    description: "Calculate completed head-to-head history between stable Sleeper user IDs across league seasons for rivalry recaps and all-time records. Future scheduled matchups are excluded.",
     inputSchema: objectSchema({
       league_id: idSchema("Current/newest league ID; when provided, prior seasons are discovered automatically"),
       league_ids: { type: "array", minItems: 1, maxItems: 20, items: { type: "string" }, description: "Optional explicit league IDs, usually newest to oldest" },
@@ -109,7 +109,7 @@ function cleanId(value, label = "ID") {
 
 async function sleeper(path) {
   const response = await fetch(`${API}${path}`, {
-    headers: { "User-Agent": "sleeper-fantasy-mcp/1.2" },
+    headers: { "User-Agent": "sleeper-fantasy-mcp/1.2.1" },
     signal: AbortSignal.timeout(20_000)
   });
   if (!response.ok) throw new Error(`Sleeper API returned ${response.status} for ${path}`);
@@ -503,6 +503,20 @@ async function weeklyDebrief({ league_id, week, include_players = true }) {
   };
 }
 
+export function completedRegularSeasonWeeks(league, regularSeasonWeeks) {
+  const scheduledWeeks = regularSeasonWeeks ??
+    Math.max(1, Math.min(18, Number(league.settings?.playoff_week_start || 15) - 1));
+
+  if (league.status === "in_season" || league.status === "pre_draft") {
+    const lastScoredLeg = Number(league.settings?.last_scored_leg ?? 0);
+    if (Number.isFinite(lastScoredLeg)) {
+      return Math.max(0, Math.min(scheduledWeeks, lastScoredLeg));
+    }
+  }
+
+  return scheduledWeeks;
+}
+
 async function rivalryHistory({ league_id, league_ids, max_seasons = 10, regular_season_weeks }) {
   const records = {};
   const seasons = [];
@@ -521,7 +535,7 @@ async function rivalryHistory({ league_id, league_ids, max_seasons = 10, regular
       sleeper(`/league/${leagueId}/users`), sleeper(`/league/${leagueId}/rosters`)
     ]);
     const owners = ownersFor(users, rosters);
-    const lastWeek = regular_season_weeks || Math.max(1, Math.min(18, Number(league.settings?.playoff_week_start || 15) - 1));
+    const lastWeek = completedRegularSeasonWeeks(league, regular_season_weeks);
     const weeks = await Promise.all(Array.from({ length: lastWeek }, (_, i) => sleeper(`/league/${leagueId}/matchups/${i + 1}`)));
     weeks.forEach((weekMatchups, weekIndex) => {
       const paired = new Map();

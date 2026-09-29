@@ -84,13 +84,13 @@ The health endpoint is:
 https://sleeper-fantasy-mcp.<your-subdomain>.workers.dev/health
 ```
 
-For v1.2.0, the health response should include:
+For v1.2.1, the health response should include:
 
 ```json
 {
   "ok": true,
   "service": "sleeper-fantasy",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "mcp_endpoint": "/mcp"
 }
 ```
@@ -197,7 +197,7 @@ Example tool arguments:
 
 Sleeper links renewed leagues using `previous_league_id`.
 
-`get_league_history` can follow that chain automatically, and `get_rivalry_history` can use the same approach to build multi-season head-to-head records.
+`get_league_history` can follow that chain automatically, and `get_rivalry_history` can use the same approach to build multi-season head-to-head records. Future scheduled matchups are excluded from rivalry records; for an in-season league, only weeks through Sleeper's `last_scored_leg` are counted.
 
 Example:
 
@@ -301,6 +301,14 @@ npm run deploy
 ├── wrangler.jsonc
 └── README.md
 ```
+
+## Release notes
+
+### v1.2.1
+
+- Fixed rivalry history so future scheduled matchups are not counted as 0-0 ties.
+- In-season rivalry calculations now stop at Sleeper's `last_scored_leg`.
+- Added regression tests covering in-season, completed-season, and preseason behavior.
 
 ## API behavior and limitations
 

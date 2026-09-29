@@ -1,107 +1,261 @@
-# Sleeper Fantasy MCP for Cloudflare Workers
+# Sleeper Fantasy MCP
 
-A stateless remote MCP server that gives ChatGPT read-only access to Sleeper fantasy-football data.
+A lightweight, read-only [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for [Sleeper](https://sleeper.com/) fantasy football data, designed for AI clients such as ChatGPT and deployable on Cloudflare Workers.
 
-## Included tools — v1.2.0
+Use it to build weekly league recaps, inspect injuries, analyze waiver trends, explore historical rivalries, review playoff brackets, track traded picks, and more — without running a database or storing Sleeper credentials.
 
-- `get_league_overview` — settings, owners, rosters, standings, and current NFL state
-- `get_weekly_debrief` — matchups, scores, starters, bench, player points, transactions, standings, and player metadata
-- `get_league_injuries` — roster-aware injury/availability report with starter/reserve and depth-chart context
-- `get_trending_players` — Sleeper-wide adds/drops with optional league ownership and free-agent availability
-- `get_league_history` — automatically follows `previous_league_id` through prior seasons
-- `get_playoff_picture` — current standings plus winners/losers playoff brackets with team names
-- `get_traded_picks` — current/future traded draft picks with ownership mapping
-- `get_rivalry_history` — head-to-head history; can automatically traverse prior linked league seasons
-- `get_league_drafts` — league drafts and completed picks
-- `get_user_leagues` — NFL leagues for a Sleeper user and season
+[![Test](https://github.com/jbaros/sleeper-ffb-worker/actions/workflows/test.yml/badge.svg)](https://github.com/jbaros/sleeper-ffb-worker/actions/workflows/test.yml)
 
-The server uses Sleeper's public, read-only API. Sleeper does not require an API token for these endpoints.
+## Features
 
-## v1.2.0 additions
+- **Read-only by design** — no roster, lineup, waiver, or league mutations.
+- **No Sleeper API key required** — uses Sleeper's public read-only API.
+- **Cloudflare Workers** — small, stateless deployment with no database required.
+- **League-aware player context** — joins Sleeper player data against league rosters.
+- **Historical league traversal** — can follow Sleeper's `previous_league_id` chain automatically.
+- **MCP-native tools** — structured data intended for use by AI clients rather than scraping webpages.
+- **Optional bearer-token protection** — enable `MCP_API_KEY` if your MCP client supports custom authorization headers.
 
-### Trending players
+## Available MCP tools
 
-`get_trending_players` can return adds, drops, or both for a configurable lookback window. Supplying a `league_id` joins the trending results against that league's rosters so the response indicates whether the player is already rostered, which fantasy team owns them, and whether they are a starter/reserve.
+| Tool | Purpose |
+| --- | --- |
+| `get_league_overview` | League settings, owners, rosters, standings, and current NFL state |
+| `get_weekly_debrief` | Matchups, scores, starters, bench players, player points, transactions, standings, and player metadata |
+| `get_league_injuries` | Roster-aware injury and availability data with starter, reserve, practice, and depth-chart context |
+| `get_trending_players` | Sleeper-wide adds/drops with optional league ownership and free-agent availability |
+| `get_league_history` | Traverse linked prior seasons using `previous_league_id` |
+| `get_rivalry_history` | Historical head-to-head records across one or more league seasons |
+| `get_playoff_picture` | Current standings plus winners and losers playoff brackets |
+| `get_traded_picks` | Current and future traded draft picks with ownership mapping |
+| `get_league_drafts` | League drafts and completed draft picks |
+| `get_user_leagues` | NFL leagues for a Sleeper user and season |
 
-Example arguments:
+## Quick start
+
+### Requirements
+
+- Node.js 18 or newer
+- npm
+- A Cloudflare account
+- An MCP client that supports a remote HTTP MCP server
+
+Clone the repository:
+
+```bash
+git clone https://github.com/jbaros/sleeper-ffb-worker.git
+cd sleeper-ffb-worker
+```
+
+Install dependencies and run the tests:
+
+```bash
+npm install
+npm test
+```
+
+Authenticate Wrangler with Cloudflare:
+
+```bash
+npx wrangler login
+```
+
+Deploy:
+
+```bash
+npm run deploy
+```
+
+Wrangler will return a Worker URL similar to:
+
+```text
+https://sleeper-fantasy-mcp.<your-subdomain>.workers.dev
+```
+
+The MCP endpoint is:
+
+```text
+https://sleeper-fantasy-mcp.<your-subdomain>.workers.dev/mcp
+```
+
+The health endpoint is:
+
+```text
+https://sleeper-fantasy-mcp.<your-subdomain>.workers.dev/health
+```
+
+For v1.2.0, the health response should include:
 
 ```json
 {
-  "league_id": "1377766689973739520",
+  "ok": true,
+  "service": "sleeper-fantasy",
+  "version": "1.2.0",
+  "mcp_endpoint": "/mcp"
+}
+```
+
+## Connect an MCP client
+
+Configure your MCP client with the deployed Worker URL ending in `/mcp`.
+
+For clients such as ChatGPT that support custom remote MCP connections, add the Worker as a new MCP/plugin connection and review the discovered tools before enabling it.
+
+If you deploy a new version and your client still shows an older tool list, refresh or reconnect the MCP connection so the client rediscovers the server schema.
+
+## Example prompts
+
+Replace `<LEAGUE_ID>` with your Sleeper league ID.
+
+### Weekly recap
+
+```text
+Give me a Week 4 recap for league <LEAGUE_ID>. Include the closest matchup,
+biggest blowout, bench mistakes, transactions, major injuries, and some
+friendly trash talk.
+```
+
+### Injury report
+
+```text
+Give me an injury report for league <LEAGUE_ID>. Prioritize starters,
+questionable/doubtful/out players, reserve-list players, and important
+depth-chart context.
+```
+
+### Waiver / trending players
+
+```text
+Show the most-added and most-dropped players over the last 24 hours and tell
+me which of them are still free agents in league <LEAGUE_ID>.
+```
+
+### League history and rivalries
+
+```text
+Build an all-time rivalry report for league <LEAGUE_ID> using its linked
+previous seasons. Include head-to-head records and total points scored.
+```
+
+### Playoff picture
+
+```text
+Give me the current playoff picture for league <LEAGUE_ID> and explain the
+current seeds and bracket matchups.
+```
+
+## Player and injury data
+
+The Worker fetches Sleeper's NFL player catalog and preserves useful metadata when available, including:
+
+- player name, team, and position
+- fantasy positions
+- active/status state
+- depth-chart position and order
+- age and years of experience
+- injury status
+- injury body part
+- injury start date
+- injury notes
+- practice participation/description
+- Sleeper's `news_updated` timestamp
+
+`get_league_injuries` joins this data against the league roster and reports whether a player is currently a starter or reserve.
+
+Sleeper does not populate every field for every player, and practice/injury metadata may be sparse or change during the week. Consumers should treat missing fields as unavailable rather than as confirmation that a player is healthy.
+
+## Trending players
+
+`get_trending_players` supports:
+
+- `add`
+- `drop`
+- `both`
+
+It also accepts a configurable lookback window and result limit.
+
+Supplying a `league_id` enriches each trending result with league-specific information such as:
+
+- whether the player is already rostered
+- whether the player is available
+- fantasy team / owner
+- starter status
+- reserve status
+
+Example tool arguments:
+
+```json
+{
+  "league_id": "<LEAGUE_ID>",
   "type": "both",
   "lookback_hours": 24,
   "limit": 25
 }
 ```
 
-### Richer injury/player data
+## League history
 
-Player metadata now preserves additional Sleeper fields when available:
+Sleeper links renewed leagues using `previous_league_id`.
 
-- `active`
-- `fantasy_positions`
-- `depth_chart_position`
-- `depth_chart_order`
-- `years_exp`
-- `age`
-- `news_updated`
-- injury status/body part/start date/notes
-- practice participation/description
-
-This lets an injury report distinguish a starting skill player from a depth player instead of treating every injury equally.
-
-### Automatic league history
-
-`get_league_history` starts with the current league and follows Sleeper's `previous_league_id` chain. It can include standings for each season.
-
-`get_rivalry_history` now supports either:
-
-- `league_id` — automatically discover prior linked seasons, or
-- `league_ids` — explicitly provide the seasons to compare
+`get_league_history` can follow that chain automatically, and `get_rivalry_history` can use the same approach to build multi-season head-to-head records.
 
 Example:
 
 ```json
 {
-  "league_id": "1377766689973739520",
+  "league_id": "<LEAGUE_ID>",
   "max_seasons": 10
 }
 ```
 
-### Playoff brackets
+You can also pass explicit league IDs to `get_rivalry_history` when you want complete control over which seasons are included.
 
-`get_playoff_picture` combines standings with Sleeper's winners and losers bracket endpoints and resolves roster IDs into fantasy team/owner names.
+## Playoff brackets
 
-### Traded picks
+`get_playoff_picture` combines:
 
-`get_traded_picks` returns Sleeper's league-level traded-pick data, including future picks, and resolves original, previous, and current roster ownership.
+- current standings
+- Sleeper winners bracket
+- Sleeper losers bracket
+- roster IDs resolved to owner/team names
 
-## Deploy
+Bracket data may be empty or incomplete before Sleeper generates the playoff bracket for the season.
 
-1. Install Node.js 18 or later.
-2. Clone/open this repository.
-3. Run `npm install`.
-4. Run `npm test`.
-5. Run `npx wrangler login` and authorize your Cloudflare account if needed.
-6. Run `npm run deploy`.
+## Traded draft picks
 
-The Worker URL will look like:
+`get_traded_picks` returns Sleeper's league-level traded-pick records and resolves:
 
-`https://sleeper-fantasy-mcp.<account>.workers.dev`
+- original owner
+- previous owner
+- current owner
+- season
+- round
 
-Your MCP URL is:
+This is useful for dynasty, keeper, and draft-pick-trading leagues.
 
-`https://sleeper-fantasy-mcp.<account>.workers.dev/mcp`
+## Authentication
 
-The health check is:
+By default, the Worker does not require authentication. The underlying Sleeper endpoints used by this project are public and read-only.
 
-`https://sleeper-fantasy-mcp.<account>.workers.dev/health`
+If you want to protect your MCP endpoint, create a Wrangler secret:
 
-and should report version `1.2.0`.
+```bash
+npx wrangler secret put MCP_API_KEY
+```
 
-## Updating an existing checkout
+When `MCP_API_KEY` is configured, requests to `/mcp` must include:
 
-If you already cloned the repository:
+```http
+Authorization: Bearer <your-secret>
+```
+
+Only enable this if your MCP client supports sending the required authorization header.
+
+Do **not** commit secrets, API keys, `.dev.vars`, or other credentials to the repository.
+
+## Updating an existing deployment
+
+From an existing checkout:
 
 ```bash
 git pull
@@ -110,17 +264,68 @@ npm test
 npm run deploy
 ```
 
-## Connect it to ChatGPT
+If the MCP tool list changed, refresh or reconnect your MCP client after deploying.
 
-After deploying, refresh or reconnect the custom MCP/plugin connection if ChatGPT still shows an older tool list. Version 1.2.0 advertises **10 read-only tools**.
+## Development
 
-## Optional access key
+Run the test suite:
 
-The Worker can run without authentication because the underlying Sleeper API is public and read-only. If you set a Wrangler secret named `MCP_API_KEY`, requests must provide it as a bearer token. Do not enable this unless your MCP client is configured to send that header.
+```bash
+npm test
+```
 
-## Local checks
+Start a local Wrangler development server:
 
-- `npm test` runs protocol and authorization tests without contacting Sleeper.
-- `npm run dev` starts the Worker locally through Wrangler.
+```bash
+npm run dev
+```
 
-Sleeper asks integrations to remain below 1,000 API calls per minute. The Worker batches related requests where practical and caches the large NFL player catalog per Worker isolate for up to 24 hours.
+Deploy to Cloudflare Workers:
+
+```bash
+npm run deploy
+```
+
+### Project layout
+
+```text
+.
+├── .github/
+│   └── workflows/
+│       └── test.yml
+├── src/
+│   └── index.js
+├── test/
+│   └── worker.test.mjs
+├── package.json
+├── wrangler.jsonc
+└── README.md
+```
+
+## API behavior and limitations
+
+- The project is intentionally **read-only**.
+- Sleeper's player catalog is large, so the Worker caches it per Worker isolate for up to 24 hours.
+- Sleeper asks integrations to remain below 1,000 API calls per minute.
+- Practice, injury, depth-chart, and news-related fields may be missing or delayed.
+- Playoff bracket endpoints may not contain useful data until Sleeper creates the bracket.
+- Historical traversal depends on leagues being linked through Sleeper's `previous_league_id`.
+- This project does not scrape sports-news websites or attempt to replace official team/NFL reporting.
+
+## Security and privacy
+
+This Worker does not require Sleeper usernames, passwords, session cookies, or private Sleeper credentials.
+
+League and player information returned by the Worker comes from Sleeper's public API. If you deploy the Worker without `MCP_API_KEY`, anyone who knows the Worker URL can call its read-only MCP tools.
+
+If that is not appropriate for your deployment, enable `MCP_API_KEY` or place the Worker behind another access-control layer.
+
+## License
+
+See [LICENSE](LICENSE).
+
+## Disclaimer
+
+This is an unofficial community project and is not affiliated with, endorsed by, or sponsored by Sleeper.
+
+Sleeper and related names and marks belong to their respective owners.
